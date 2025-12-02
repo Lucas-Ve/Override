@@ -1,0 +1,184 @@
+# 📘 Override – Level03
+
+## 📝 Description
+
+Ce niveau du projet **Override** repose non pas sur un buffer overflow, mais sur une **erreur cryptographique fondamentale** : une chaîne est chiffrée via un simple XOR à clé unique, et le programme utilise un calcul déterministe basé sur le mot de passe entré pour dériver cette clé.
+Comme la méthode de chiffrement est réversible, il est trivial de retrouver la clé XOR et donc de déduire le **mot de passe exact** à fournir.
+
+L’objectif est de comprendre la logique du programme, d’analyser la fonction `decrypt()`, de retrouver la clé XOR et d’en déduire le mot de passe permettant de déclencher un shell.
+
+---
+
+## 🔍 Analyse du binaire
+
+### Code pertinent (résumé)
+
+```c
+void test(int param_1, int param_2)
+{
+    EVP_PKEY_CTX *pEVar1;
+
+    pEVar1 = (EVP_PKEY_CTX *)(param_2 - param_1);
+    decrypt(pEVar1, ...);
+}
+
+int decrypt(EVP_PKEY_CTX *ctx, uchar *out, ...)
+{
+    byte local_21[17] = {
+        0x51,0x7d,0x7c,0x75,0x60,0x73,0x66,0x67,
+        0x7e,0x73,0x66,0x7b,0x7d,0x7c,0x61,0x33,0x00
+    };
+
+    for (i = 0; i < 16; i++)
+        local_21[i] ^= (byte)ctx;
+
+    if (!strcmp((char*)local_21, "Congratulations!"))
+        system("/bin/sh");
+    else
+        puts("Invalid Password");
+}
+```
+
+### Ce qu’il faut retenir
+
+* `local_21` contient une **chaîne chiffrée fixe**.
+
+* Chaque caractère est déchiffré via :
+
+  ```
+  déchiffré[i] = chiffré[i] XOR (byte)ctx
+  ```
+
+* Le résultat est comparé à `"Congratulations!"`.
+
+* Si ça matche → `system("/bin/sh")`.
+
+---
+
+## 🧩 Comprendre la dérivation de la clé
+
+La fonction `test()` calcule :
+
+```c
+ctx = param_2 - param_1;
+```
+
+Et dans le vrai binaire :
+
+```
+param_2 = 0x1337d00d
+param_1 = password_input
+```
+
+Donc :
+
+```
+ctx = 0x1337d00d - password
+```
+
+Puis seul l’octet bas est utilisé :
+
+```
+(byte)ctx
+```
+
+---
+
+## 🔐 Trouver la clé XOR
+
+Nous savons que :
+
+```
+cipher[0] XOR key = plaintext[0]
+```
+
+Avec :
+
+* `cipher[0] = 0x51 ('Q')`
+* `plaintext[0] = 'C' = 0x43`
+
+Donc :
+
+```
+key = 0x51 XOR 0x43 = 0x12  (18 décimal)
+```
+
+✔ La clé XOR est **0x12**.
+
+Nous voulons donc que :
+
+```
+(byte)ctx = 0x12
+```
+
+Or :
+
+```
+ctx = 0x1337d00d - password
+```
+
+Donc :
+
+```
+0x1337d00d - password = 0x12
+```
+
+---
+
+## 🧮 Calcul du mot de passe
+
+```
+password = 0x1337d00d - 0x12
+password = 0x1337cffb
+```
+
+Converti en décimal :
+
+```
+322424827
+```
+
+👉 **C’est le mot de passe correct.**
+
+---
+
+## 🚀 Exploitation
+
+Exécution du programme :
+
+```
+level03@OverRide:~$ ./level03
+***********************************
+*            level03             **
+***********************************
+Password:322424827
+$ whoami
+level04
+$ cat /home/users/level04/.pass
+kgv3tkEb9h2mLkRsPkXRfc2mHbjMxQzvb2FrgKkf
+```
+
+✔ Shell obtenu
+✔ Mot de passe du niveau 04 récupéré
+
+---
+
+## 📌 Résumé
+
+| Élément                 | Valeur                           |
+| ----------------------- | -------------------------------- |
+| Type de vulnérabilité   | Chiffrement XOR réversible       |
+| Chaîne chiffrée         | 17 octets en dur dans le binaire |
+| Chaîne attendue         | `"Congratulations!"`             |
+| Clé XOR trouvée         | `0x12`                           |
+| Relation clé ⇢ password | `ctx = 0x1337d00d - password`    |
+| Mot de passe final      | **322424827**                   |
+| Résultat                | Shell → *level04*                |
+
+---
+
+## 🧠 Points pédagogiques
+
+* Le XOR à clé unique est **réversible** dès qu’on connaît un seul octet de texte en clair.
+* Le cast `(byte)ctx` réduit la sécurité à **1 seul octet**, rendant l’opération triviale.
+* Le challenge illustre parfaitement pourquoi on ne doit **jamais coder soi-même de la crypto**.

