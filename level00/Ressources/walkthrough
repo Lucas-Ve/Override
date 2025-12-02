@@ -1,0 +1,103 @@
+# 📘 Override – Level00
+
+## 📝 Description
+
+Ce premier niveau du projet **Override** consiste à analyser un binaire simple et comprendre la logique d’authentification implémentée dans son `main()`.
+L'objectif est de récupérer le mot de passe attendu afin d’obtenir un shell et lire le fichier `.pass` du niveau suivant.
+
+---
+
+## 🔍 Analyse du binaire
+
+Voici le code désassemblé/reconstruit du `main()` fourni :
+
+```c
+bool main(void)
+{
+    int local_14[4];
+
+    puts("***********************************");
+    puts("* \t     -Level00 -\t\t  *");
+    puts("***********************************");
+
+    printf("Password:");
+    __isoc99_scanf(&DAT_08048636, local_14);
+
+    if (local_14[0] != 0x149c) {
+        puts("\nInvalid Password!");
+    } else {
+        puts("\nAuthenticated!");
+        system("/bin/sh");
+    }
+
+    return local_14[0] != 0x149c;
+}
+```
+
+### ✔ Points importants
+
+* Le programme demande un **password** via `scanf`.
+* La valeur lue est stockée dans `local_14[0]`.
+* Le mot de passe attendu est comparé à la valeur **0x149c**.
+* Si la valeur correspond → exécution de `system("/bin/sh")`.
+
+---
+
+## 🔢 Conversion du mot de passe
+
+Le mot de passe est stocké en **hexadécimal** :
+
+```
+0x149c
+```
+
+Convertissons-le :
+
+```
+0x149c = 5276 (en décimal)
+```
+
+C’est le mot de passe attendu par le programme.
+
+---
+
+## 🚀 Exploitation
+
+On exécute simplement le programme avec l’entrée correcte :
+
+```
+level00@OverRide:~$ ./level00
+***********************************
+*           -Level00 -            *
+***********************************
+Password:5276
+
+Authenticated!
+```
+
+On obtient alors un shell :
+
+```
+$ whoami
+level01
+```
+
+Puis on peut lire le mot de passe du prochain niveau :
+
+```
+$ cat /home/users/level01/.pass
+uSq2ehEGT6c9S24zbshexZQBXUGrncxn5sD5QfGL
+```
+
+---
+
+## ✅ Résumé
+
+| Élément                | Valeur                                                       |
+| ---------------------- | ------------------------------------------------------------ |
+| Vulnérabilité          | Aucun check complexe → mot de passe en clair dans le binaire |
+| Condition d'accès      | `local_14[0] == 0x149c`                                      |
+| Mot de passe (décimal) | **5276**                                                     |
+| Gain                   | Shell en tant que *level01*                                  |
+
+
