@@ -1,0 +1,192 @@
+# 📘 Override – Level06
+
+## 📝 Description
+
+Ce niveau introduit un mécanisme d’authentification basé sur un **serial généré dynamiquement à partir du login**.  
+L’objectif est d’analyser la fonction `auth()` en reverse engineering afin de **recalculer exactement le serial attendu**, permettant d’obtenir un shell en tant que *level07*.
+
+Le challenge est compliqué par un mécanisme anti-debug (`ptrace`) empêchant l’utilisation directe de GDB.
+
+---
+
+## 🔍 Analyse du binaire
+
+### Code principal
+
+```c
+printf("-> Enter Login: ");
+fgets(local_34, 0x20, stdin);
+
+printf("-> Enter Serial: ");
+scanf("%u", &serial);
+
+if (auth(local_34, serial) == 0) {
+    system("/bin/sh");
+}
+````
+
+Le programme lit :
+
+1. un **login** (max 32 chars)
+2. un **serial** (unsigned int)
+
+Puis valide le serial via `auth()`.
+
+---
+
+## 🔒 Fonction `auth()`
+
+Voici ce que la fonction fait :
+
+### 1️⃣ Nettoyage du login
+
+```c
+param_1[strcspn(param_1, "\n")] = '\0';
+if (strlen(param_1) < 6) return 1;
+```
+
+➡️ Login **≥ 6 caractères** obligatoire.
+
+---
+
+### 2️⃣ Anti-debug (ptrace)
+
+```c
+if (ptrace(PTRACE_TRACEME) == -1) {
+    // TAMPERING DETECTED
+    return 1;
+}
+```
+
+➡️ Impossible d’exécuter normalement sous GDB
+(MAIS on va bypasser ça 💡).
+
+---
+
+### 3️⃣ Initialisation du seed
+
+```c
+seed = (login[3] ^ 0x1337) + 0x5eeded;
+```
+
+✔ Très important : le hash dépend de la **4ᵉ lettre du login**.
+
+---
+
+### 4️⃣ Algorithme de hash
+
+Pour chaque caractère du login :
+
+```c
+if (login[i] < ' ') return 1;   // invalid chars
+
+seed += ((login[i] ^ seed) % 1337);
+```
+
+➡️ Le seed final dépend :
+
+* de **chaque caractère**
+* de la **longueur**
+* de l’ordre
+* de la valeur ASCII
+
+---
+
+### 5️⃣ Vérification finale
+
+```c
+return (serial == seed) ? 0 : 1;
+```
+
+➡️ Si `serial == seed` → shell.
+
+---
+
+## 🎯 Objectif
+
+Pour un login donné, il suffit de **recalculer le même seed** en reproduisant la fonction `auth()`.
+
+---
+
+## 🧠 Reverse engineering + Bypass ptrace
+
+Pour observer le `seed` dans GDB, il faut bypasser le `ptrace(PTRACE_TRACEME)`.
+
+### 🛠️ Méthode efficace
+
+1. Break juste après l’appel à `ptrace`
+
+   ```gdb
+   b *0x080487ba
+   ```
+2. Break avant la comparaison finale
+
+   ```gdb
+   b *0x08048866
+   ```
+3. Run
+
+   ```gdb
+   r
+   ```
+4. Quand GDB s’arrête au ptrace
+
+   ```gdb
+   set $eax=1     # Simule un ptrace réussi
+   c
+   ```
+5. À la fin de la fonction `auth()`, afficher `seed`
+
+   ```gdb
+   p/x *(int*)($ebp - 0x10)
+   ```
+
+---
+
+## 🧪 Exemple avec le login : `lveloso`
+
+### Suivi dans GDB :
+
+```
+Breakpoint 1: ptrace bypass
+set $eax=1
+continue
+```
+
+Puis :
+
+```
+Breakpoint 2: end of auth()
+print *(int*)($ebp - 0x10)
+$1 = 6233762
+```
+
+➡️ Le serial attendu est **6233762**.
+
+---
+
+## 🚀 Exploitation
+
+```bash
+level06@OverRide:~$ ./level06 
+-> Enter Login: lveloso
+-> Enter Serial: 6233762
+Authenticated!
+$ whoami
+level07
+$ cat /home/users/level07/.pass
+GbcPDRgsFK77LNnnuh7QyFYA2942Gp8yKj9KrWD8
+```
+
+---
+
+## ✔ Résumé
+
+| Élément              | Valeur                                     |
+| -------------------- | ------------------------------------------ |
+| Vulnérabilité        | Fonction de hash reversible                |
+| Protection gênante   | `ptrace(PTRACE_TRACEME)`                   |
+| Bypass               | `set $eax = 0` après le call ptrace        |
+| seed = serial        | dépend uniquement du login                 |
+| Accès obtenu         | Shell level07                              |
+| Mot de passe level07 | `GbcPDRgsFK77LNnnuh7QyFYA2942Gp8yKj9KrWD8` |
