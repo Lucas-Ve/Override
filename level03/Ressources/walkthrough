@@ -101,6 +101,7 @@ Donc :
 
 ```
 key = 0x51 XOR 0x43 = 0x12  (18 décimal)
+01010001 XOR 01000011 = 00010010 (18 décimal)
 ```
 
 ✔ La clé XOR est **0x12**.
